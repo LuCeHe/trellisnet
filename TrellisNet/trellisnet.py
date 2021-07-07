@@ -158,6 +158,7 @@ class TrellisNet(nn.Module):
 
         out = Z[:, -nout:].transpose(1, 2)              # Dimension (N, L, nout)
         hc = (Z[:, ninp:, -1:], self.ct[:, :, -1:])     # Dimension (N, h_size, L)
+
         if aux:
             aux_outs = torch.cat(aux_outs, dim=0).transpose(0, 1).transpose(2, 3)
         else:

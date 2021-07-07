@@ -1,6 +1,9 @@
-import argparse
+import argparse, shutil, json, sys
 import torch.optim as optim
-import sys
+import numpy as np
+
+from GenericTools.KerasTools.plot_tools import plot_history
+from GenericTools.StayOrganizedTools.utils import timeStructured
 from utils import *
 from data import data_generator
 import time
@@ -19,25 +22,26 @@ parser.add_argument('--dataset', type=str, default='ptb',
                     help='dataset to use')
 parser.add_argument('--name', type=str, default='Trellis_charPTB',
                     help='name of the process')
-parser.add_argument('--emsize', type=int, default=200,
+parser.add_argument('--emsize', type=int, default=10,  # 200
                     help='size of word embeddings')
-parser.add_argument('--nhid', type=int, default=1050,
+parser.add_argument('--nhid', type=int, default=10,  # 1050
                     help='number of hidden units per layer')
-parser.add_argument('--nout', type=int, default=200,
+parser.add_argument('--nout', type=int, default=10,  # 200
                     help='number of output units')
 parser.add_argument('--lr', type=float, default=2e-3,
                     help='initial learning rate (default: 2e-3)')
 parser.add_argument('--clip', type=float, default=0.2,
                     help='gradient clipping')
-parser.add_argument('--epochs', type=int, default=400,
+parser.add_argument('--epochs', type=int, default=2, # 400
                     help='upper epoch limit (default: 400)')
 parser.add_argument('--batch_size', type=int, default=24, metavar='N',
                     help='batch size')
 
 # For most of the time, you should change these two together
-parser.add_argument('--nlevels', type=int, default=140,
+n_levels = 10  # 140
+parser.add_argument('--nlevels', type=int, default=n_levels,
                     help='levels of the network')
-parser.add_argument('--horizon', type=int, default=140,
+parser.add_argument('--horizon', type=int, default=n_levels,
                     help='The effective history size')
 
 parser.add_argument('--dropout', type=float, default=0.1,
@@ -70,7 +74,7 @@ parser.add_argument('--repack', action='store_false',
                     help='use repackaging (default: True)')
 parser.add_argument('--eval', action='store_true',
                     help='evaluation only mode')
-parser.add_argument('--aux', type=float, default=0.3,
+parser.add_argument('--aux', type=float, default=-1,  # .3
                     help='use auxiliary loss (default: 0.3), -1 means no auxiliary loss used')
 parser.add_argument('--aux_freq', type=float, default=80,
                     help='auxiliary loss frequency (default: 80)')
@@ -119,11 +123,32 @@ val_data = batchify(char_tensor(corpus, valfile), eval_batch_size, args)
 test_data = batchify(char_tensor(corpus, testfile), eval_batch_size, args)
 print(train_data.size(), val_data.size())
 
+FILENAME = os.path.realpath(__file__)
+CDIR = os.path.dirname(FILENAME)
+EXPERIMENTS = os.path.join(CDIR, 'experiments')
+EXPERIMENT = os.path.join(EXPERIMENTS, timeStructured())
+LOGSDIR = os.path.join(EXPERIMENT, 'logs')
+for d in [EXPERIMENTS, EXPERIMENT, LOGSDIR, 'weights']:
+    if not os.path.isdir(d): os.mkdir(d)
+
+from prettytable import PrettyTable
+
+def count_parameters(model):
+    table = PrettyTable(["Modules", "Parameters"])
+    total_params = 0
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad: continue
+        param = parameter.numel()
+        table.add_row([name, param])
+        total_params+=param
+    print(table)
+    print(f"Total Trainable Params: {total_params}")
+    return total_params
 
 class Logger(object):
     def __init__(self):
         self.terminal = sys.stdout
-        self.log = open("logs/" + args.name + ".log", "a")
+        self.log = open(LOGSDIR + args.name + ".log", "a")
 
     def write(self, message):
         self.terminal.write(message)
@@ -173,6 +198,7 @@ if args.cuda:
 criterion = nn.CrossEntropyLoss()
 optimizer = getattr(optim, args.optim)(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
 
+
 ###############################################################################
 # Training code
 ###############################################################################
@@ -211,7 +237,7 @@ def evaluate(data_source):
             final_decoded = decoded[eff_history:].contiguous().view(-1, ntokens)
 
             loss = criterion(final_decoded, targets)
-            loss = loss.data
+            loss = loss  # loss.data
 
             total_loss += (data.size(1) - eff_history) * loss
             processed_data_size += data.size(1) - eff_history
@@ -219,7 +245,7 @@ def evaluate(data_source):
         decoded = None
         final_decoded = None
         targets = None
-        all_decoded = None   # This is for auxiliary losses; not used in evaluation
+        all_decoded = None  # This is for auxiliary losses; not used in evaluation
 
         return total_loss.item() / processed_data_size
 
@@ -240,7 +266,7 @@ def train(epoch):
         validseqlen = args.horizon
         seq_len = args.horizon
 
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, validseqlen)):
+    for batch, i in enumerate(range(2)):  # enumerate(range(0, train_data.size(0) - 1, validseqlen)):
         # When not using repackaging mode, we DISCARD the first arg.horizon outputs in backprop (which are
         # the "effective history".
         eff_history = args.horizon if eff_history_mode else 0
@@ -280,18 +306,19 @@ def train(epoch):
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         optimizer.step()
 
-        total_loss += raw_loss.data
+        total_loss += raw_loss  # raw_loss.data
         if args.aux:
-            total_aux_losses += aux_losses.data
+            total_aux_losses += aux_losses  # aux_losses.data
 
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss.item() / args.log_interval
-            cur_aux_loss = total_aux_losses.item() / args.log_interval if args.aux else 0
+
+            cur_aux_loss = total_aux_losses.item() / args.log_interval if args.aux > 0 else 0
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | ms/batch {:5.2f} | '
                   'raw_loss {:5.3f} | aux_loss {:5.2f} | bpc {:5.3f}'.format(
-                   epoch, batch, len(train_data) // validseqlen, lr,
-                   elapsed * 1000 / args.log_interval, cur_loss, cur_aux_loss, cur_loss / math.log(2)))
+                epoch, batch, len(train_data) // validseqlen, lr,
+                              elapsed * 1000 / args.log_interval, cur_loss, cur_aux_loss, cur_loss / math.log(2)))
             total_loss = 0
             total_aux_losses = 0
             start_time = time.time()
@@ -320,16 +347,21 @@ if args.eval:
     print("Eval only mode")
     inference(-1)
     sys.exit(0)
-    
+
+count_parameters(model)
 lr = args.lr
 best_val_loss = None
 all_val_losses = []
 all_test_losses = []
+metrics = { 'bpc': [],  'xe': []}
 try:
     for epoch in range(1, args.epochs + 1):
         loss = train(epoch)
 
         val_loss, test_loss = inference(epoch)
+
+        metrics['xe'].append(val_loss)
+        metrics['bpc'].append(val_loss/math.log(2))
 
         if not best_val_loss or val_loss < best_val_loss:
             print("Saving model (new best validation) in " + args.save)
@@ -347,6 +379,7 @@ try:
         all_val_losses.append(val_loss)
         all_test_losses.append(test_loss)
         sys.stdout.flush()
+
 except KeyboardInterrupt:
     print('-' * 89)
     print("Saving before quit...")
@@ -356,7 +389,7 @@ except KeyboardInterrupt:
 with open(args.save, 'rb') as f:
     model = torch.load(f)
     model.save_weights('weights/pretrained_charptb.pkl')
-    
+
 # Run on test data
 test_loss = evaluate(test_data)
 print('=' * 89)
@@ -364,3 +397,12 @@ print('| End of training | test loss {:5.3f} | test bpc {:8.3f}'.format(
     test_loss, test_loss / math.log(2)))
 print('=' * 89)
 
+plot_filename = os.path.join(*[EXPERIMENT, 'history.png'])
+print(metrics)
+plot_history(metrics, plot_filename, args.epochs)
+json_filename = os.path.join(*[EXPERIMENT, 'history.json'])
+history_jsonable = {k: np.array(v).astype(float).tolist() for k, v in metrics.items()}
+json.dump(history_jsonable, open(json_filename, "w"))
+
+print('DONE!')
+shutil.make_archive(EXPERIMENT, 'zip', EXPERIMENT)
