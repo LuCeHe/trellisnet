@@ -1,6 +1,7 @@
 import argparse, shutil, json, sys
 import torch.optim as optim
 import numpy as np
+from tqdm import tqdm
 
 from GenericTools.KerasTools.plot_tools import plot_history
 from GenericTools.StayOrganizedTools.utils import timeStructured
@@ -22,23 +23,23 @@ parser.add_argument('--dataset', type=str, default='ptb',
                     help='dataset to use')
 parser.add_argument('--name', type=str, default='Trellis_charPTB',
                     help='name of the process')
-parser.add_argument('--emsize', type=int, default=10,  # 200
+parser.add_argument('--emsize', type=int, default=200,  # 200
                     help='size of word embeddings')
-parser.add_argument('--nhid', type=int, default=10,  # 1050
+parser.add_argument('--nhid', type=int, default=1050,  # 1050
                     help='number of hidden units per layer')
-parser.add_argument('--nout', type=int, default=10,  # 200
+parser.add_argument('--nout', type=int, default=200,  # 200
                     help='number of output units')
 parser.add_argument('--lr', type=float, default=2e-3,
                     help='initial learning rate (default: 2e-3)')
 parser.add_argument('--clip', type=float, default=0.2,
                     help='gradient clipping')
-parser.add_argument('--epochs', type=int, default=2, # 400
+parser.add_argument('--epochs', type=int, default=0, # 400
                     help='upper epoch limit (default: 400)')
-parser.add_argument('--batch_size', type=int, default=24, metavar='N',
+parser.add_argument('--batch_size', type=int, default=8, metavar='N', # 24
                     help='batch size')
 
 # For most of the time, you should change these two together
-n_levels = 10  # 140
+n_levels = 140  # 140
 parser.add_argument('--nlevels', type=int, default=n_levels,
                     help='levels of the network')
 parser.add_argument('--horizon', type=int, default=n_levels,
@@ -62,7 +63,7 @@ parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--anneal', type=int, default=5,
                     help='learning rate annealing criteria (default: 5)')
-parser.add_argument('--cuda', action='store_false',
+parser.add_argument('--cuda', action='store_true', #store_false
                     help='use CUDA (default: True)')
 parser.add_argument('--wnorm', action='store_false',
                     help='use weight normalization (default: True)')
@@ -92,11 +93,12 @@ parser.add_argument('--n_experts', type=int, default=0,
                     help='number of softmax experts (default: 0)')
 parser.add_argument('--load', type=str, default='',
                     help='path to load the model')
-parser.add_argument('--load_weight', type=str, default='',
+parser.add_argument('--load_weight', type=str, default='data/pretrained_charptb_trellisnet.pkl',
                     help='path to load the model weights (please only use --load or --load_weight)')
 
 args = parser.parse_args()
 args.save = args.name + ".pt"
+
 
 # Set the random seed manually for reproducibility.
 torch.manual_seed(args.seed)
@@ -113,23 +115,39 @@ if torch.cuda.is_available():
 # Load data
 ###############################################################################
 
-file, file_len, valfile, valfile_len, testfile, testfile_len, corpus = data_generator(args)
-
-ntokens = len(corpus.dictionary)
-eval_batch_size = 10
-test_batch_size = 10
-train_data = batchify(char_tensor(corpus, file), args.batch_size, args)
-val_data = batchify(char_tensor(corpus, valfile), eval_batch_size, args)
-test_data = batchify(char_tensor(corpus, testfile), eval_batch_size, args)
-print(train_data.size(), val_data.size())
-
 FILENAME = os.path.realpath(__file__)
 CDIR = os.path.dirname(FILENAME)
 EXPERIMENTS = os.path.join(CDIR, 'experiments')
 EXPERIMENT = os.path.join(EXPERIMENTS, timeStructured())
 LOGSDIR = os.path.join(EXPERIMENT, 'logs')
-for d in [EXPERIMENTS, EXPERIMENT, LOGSDIR, 'weights']:
+DATADIR = os.path.join(CDIR, 'data')
+
+INDICESDIR = os.path.join(DATADIR, 'indices_ptb')
+
+for d in [EXPERIMENTS, EXPERIMENT, LOGSDIR, DATADIR, INDICESDIR, 'weights']:
     if not os.path.isdir(d): os.mkdir(d)
+
+
+file, file_len, valfile, valfile_len, testfile, testfile_len, corpus = data_generator(args)
+ntokens = len(corpus.dictionary)
+eval_batch_size = 10
+test_batch_size = 10
+
+if len(os.listdir(INDICESDIR)) == 0:
+    train_data = batchify(char_tensor(corpus, file), args.batch_size, args)
+    val_data = batchify(char_tensor(corpus, valfile), eval_batch_size, args)
+    test_data = batchify(char_tensor(corpus, testfile), eval_batch_size, args)
+    torch.save(train_data, os.path.join(INDICESDIR, 'train_indices.pt'))
+    torch.save(val_data, os.path.join(INDICESDIR, 'val_indices.pt'))
+    torch.save(test_data, os.path.join(INDICESDIR, 'test_indices.pt'))
+else:
+    train_data = torch.load(os.path.join(INDICESDIR, 'train_indices.pt'))
+    val_data = torch.load(os.path.join(INDICESDIR, 'val_indices.pt'))
+    test_data = torch.load(os.path.join(INDICESDIR, 'test_indices.pt'))
+
+
+
+
 
 from prettytable import PrettyTable
 
@@ -219,7 +237,7 @@ def evaluate(data_source):
             seq_len = args.horizon
 
         processed_data_size = 0
-        for i in range(0, data_source.size(0) - 1, validseqlen):
+        for i in tqdm(range(0, data_source.size(0) - 1, validseqlen)):
             eff_history = args.horizon if eff_history_mode else 0
             if i + eff_history >= data_source.size(0) - 1: continue
             data, targets = get_batch(data_source, i, seq_len, evaluation=True)
@@ -386,9 +404,9 @@ except KeyboardInterrupt:
     save(model, args)
 
 # Load the best saved model
-with open(args.save, 'rb') as f:
-    model = torch.load(f)
-    model.save_weights('weights/pretrained_charptb.pkl')
+# with open(args.save, 'rb') as f:
+#     model = torch.load(f)
+#     model.save_weights('data/pretrained_charptb.pkl')
 
 # Run on test data
 test_loss = evaluate(test_data)
